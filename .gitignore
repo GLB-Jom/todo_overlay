@@ -4,6 +4,8 @@ todo_data.json
 ical_cache.json
 google_token.json
 *.json.bak
+PROJECT_BRIEF.md
+todo_data.backup*.json
 
 # Python
 __pycache__/

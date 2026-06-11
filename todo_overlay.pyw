@@ -26,6 +26,7 @@ import calendar
 import http.server
 import json
 import re
+import shutil
 import socketserver
 import sys
 import threading
@@ -43,6 +44,8 @@ from tkinter import ttk, font as tkfont, messagebox, filedialog
 APP_NAME = "TodoOverlay"
 APP_DIR = Path(__file__).resolve().parent
 DATA_FILE = APP_DIR / "todo_data.json"
+BACKUP_FILE = APP_DIR / "todo_data.backup.json"
+BACKUP_FILE2 = APP_DIR / "todo_data.backup2.json"
 CACHE_FILE = APP_DIR / "ical_cache.json"
 TOKEN_FILE = APP_DIR / "google_token.json"
 
@@ -53,13 +56,46 @@ GOOGLE_EVENTS_URL = ("https://www.googleapis.com/calendar/v3/"
                      "calendars/primary/events")
 
 MAGIC = "#010203"        # color key made fully transparent in ghost mode
-PANEL_BG = "#1c1c22"     # panel background (normal mode)
-ROW_BG = "#26262e"       # task row background (normal mode)
-TEXT = "#f0f0f0"
-DIM = "#9a9aa2"
-ACCENT = "#4aa3ff"
-EVENT_FG = "#ffce54"     # day-number color when the day has events
-WEEKEND_FG = "#ff8a80"   # Sat-Sun day-number color
+
+# Theme color sets — chosen set is applied to module globals (TEXT,
+# PANEL_BG, ...) via apply_theme(), so the rest of the code keeps
+# using the same constant names.
+THEMES = {
+    "dark": dict(
+        PANEL_BG="#1c1c22",   # panel background (normal mode)
+        ROW_BG="#26262e",     # task row background (normal mode)
+        TEXT="#e6e3f0",       # soft pastel white (not stark white)
+        DIM="#9a9aa2",
+        ACCENT="#4aa3ff",
+        EVENT_FG="#ffce54",   # day-number color when the day has events
+        WEEKEND_FG="#ff8a80",  # Sat-Sun day-number color
+        DIVIDER="#3a3a44",
+        DRAG_TINT="#3a3a55",  # row color while dragging to reorder
+        TODAY_FG="#101014",   # day-number color on the accent "today" cell
+        OVERDUE_FG="#ff6b5e",
+    ),
+    "light": dict(
+        PANEL_BG="#f0ece4",   # soft cream
+        ROW_BG="#e5e0d4",
+        TEXT="#2c2a32",
+        DIM="#7a7680",
+        ACCENT="#2f6fd0",
+        EVENT_FG="#b07d00",
+        WEEKEND_FG="#d05c50",
+        DIVIDER="#cfc8bb",
+        DRAG_TINT="#d8d2c2",
+        TODAY_FG="#ffffff",
+        OVERDUE_FG="#c0392b",
+    ),
+}
+
+
+def apply_theme(name):
+    """Load a theme's colors into module globals."""
+    globals().update(THEMES.get(name, THEMES["dark"]))
+
+
+apply_theme("dark")      # defaults until settings are loaded
 
 STATUS_ORDER = ["wait", "doing", "done"]
 STATUS_LABEL = {"wait": "รอ", "doing": "กำลังทำ", "done": "ทำแล้ว"}
@@ -78,6 +114,7 @@ FETCH_INTERVAL_MS = 30 * 60 * 1000   # refresh iCal every 30 minutes
 
 DEFAULT_DATA = {
     "settings": {
+        "theme": "dark",          # "dark" | "light"
         "font_family": "Segoe UI",
         "font_size": 11,
         "opacity": 0.88,
@@ -102,6 +139,20 @@ DEFAULT_DATA = {
 # ----------------------------------------------------------------------
 # Data layer
 # ----------------------------------------------------------------------
+def backup_data_file(has_tasks):
+    """Keep 2 rotating backups of todo_data.json, made at startup.
+    Skipped when there are no tasks, so a freshly-created empty file
+    can never overwrite a good backup."""
+    if not has_tasks:
+        return
+    try:
+        if BACKUP_FILE.exists():
+            shutil.copy2(BACKUP_FILE, BACKUP_FILE2)
+        shutil.copy2(DATA_FILE, BACKUP_FILE)
+    except OSError:
+        pass
+
+
 def load_data():
     if DATA_FILE.exists():
         try:
@@ -110,6 +161,7 @@ def load_data():
             for k, v in DEFAULT_DATA["settings"].items():
                 data.setdefault("settings", {}).setdefault(k, v)
             data.setdefault("tasks", [])
+            backup_data_file(bool(data["tasks"]))
             return data
         except (json.JSONDecodeError, OSError):
             try:
@@ -409,6 +461,7 @@ class TodoOverlay:
     # ---------------- appearance ----------------
     def apply_appearance(self):
         s = self.data["settings"]
+        apply_theme(s.get("theme", "dark"))
         if s["ghost_mode"]:
             self.bg = MAGIC
             self.row_bg = MAGIC
@@ -473,7 +526,6 @@ class TodoOverlay:
         hbtn("✕", self.quit)
         hbtn("⚙", self.open_settings)
         hbtn("📅", self.toggle_calendar)
-        hbtn("👁", self.toggle_done)
         hbtn("＋", lambda: self.open_task_dialog(None), tip_fg=ACCENT)
 
         # calendar container (above the todo list)
@@ -495,6 +547,9 @@ class TodoOverlay:
         tasks = self.data["tasks"]
         if not s["show_done"]:
             tasks = [t for t in tasks if t["status"] != "done"]
+        # show done tasks at the bottom (display only; data order unchanged)
+        tasks = ([t for t in tasks if t["status"] != "done"]
+                 + [t for t in tasks if t["status"] == "done"])
 
         if not tasks:
             tk.Label(self.list_frame, text="ยังไม่มีงาน — กด ＋ เพื่อเพิ่ม",
@@ -502,6 +557,7 @@ class TodoOverlay:
                      pady=10).pack()
         for t in tasks:
             self.build_row(t)
+        self.root.geometry("")          # let the window shrink to fit
         self.root.update_idletasks()
 
     def build_row(self, t):
@@ -532,7 +588,7 @@ class TodoOverlay:
 
         if self.data["settings"]["show_due"] and t.get("due"):
             overdue = (not done) and t["due"] < date.today().isoformat()
-            due_fg = "#ff6b5e" if overdue else DIM
+            due_fg = OVERDUE_FG if overdue else DIM
             d = datetime.strptime(t["due"], "%Y-%m-%d")
             tk.Label(top, text=f"📅 {d.strftime('%d/%m')}",
                      font=self.f_small, fg=due_fg, bg=self.row_bg,
@@ -582,7 +638,7 @@ class TodoOverlay:
             return
         if not d["active"] and abs(e.y_root - d["y"]) > 6:
             d["active"] = True
-            self._tint_row(d["row"], d["bar"], "#3a3a55")
+            self._tint_row(d["row"], d["bar"], DRAG_TINT)
 
     def row_release(self, e):
         d = self._row_drag
@@ -625,6 +681,8 @@ class TodoOverlay:
         for w in self.cal_frame.winfo_children():
             w.destroy()
         if not self.data["settings"]["show_calendar"]:
+            self.root.geometry("")      # let the window shrink to fit
+            self.root.update_idletasks()
             return
 
         nav = tk.Frame(self.cal_frame, bg=self.bg)
@@ -677,7 +735,7 @@ class TodoOverlay:
                 if has_ev:
                     fg, fnt = EVENT_FG, self.f_cal_b
                 if iso == today_iso:
-                    fg, bg = "#101014", ACCENT
+                    fg, bg = TODAY_FG, ACCENT
                 cell = tk.Label(grid, text=str(day), font=fnt, fg=fg, bg=bg,
                                 width=3, pady=1,
                                 cursor="hand2" if has_ev else "")
@@ -685,8 +743,9 @@ class TodoOverlay:
                 if has_ev:
                     cell.bind("<Button-1>",
                               lambda e, d=iso: self.show_day_events(e, d))
-        tk.Frame(self.cal_frame, bg="#3a3a44", height=1).pack(
+        tk.Frame(self.cal_frame, bg=DIVIDER, height=1).pack(
             fill="x", pady=(6, 6))
+        self.root.geometry("")          # let the window shrink to fit
         self.root.update_idletasks()
 
     def shift_month(self, delta):
@@ -820,12 +879,6 @@ class TodoOverlay:
             save_data(self.data)
             self.refresh()
 
-    def toggle_done(self):
-        s = self.data["settings"]
-        s["show_done"] = not s["show_done"]
-        save_data(self.data)
-        self.refresh()
-
     def toggle_calendar(self):
         s = self.data["settings"]
         s["show_calendar"] = not s["show_calendar"]
@@ -860,6 +913,8 @@ class TodoOverlay:
         dlg.configure(bg=PANEL_BG, padx=14, pady=12)
         dlg.attributes("-topmost", True)
         dlg.resizable(False, False)
+        dlg.geometry(f"+{self.root.winfo_x() + 30}"
+                     f"+{self.root.winfo_y() + 30}")
         dlg.grab_set()
 
         def lab(text, r):
@@ -951,6 +1006,8 @@ class TodoOverlay:
         dlg.configure(bg=PANEL_BG, padx=14, pady=12)
         dlg.attributes("-topmost", True)
         dlg.resizable(False, False)
+        dlg.geometry(f"+{self.root.winfo_x() + 30}"
+                     f"+{self.root.winfo_y() + 30}")
         dlg.grab_set()
 
         def lab(text, r):
@@ -1069,7 +1126,19 @@ class TodoOverlay:
                  fg=DIM, bg=PANEL_BG, font=self.f_small).pack(
                      side="left", padx=6)
 
+        lab("ธีมสี", 9)
+        v_theme = tk.StringVar(value=s.get("theme", "dark"))
+        th_fr = tk.Frame(dlg, bg=PANEL_BG)
+        th_fr.grid(row=9, column=1, sticky="w", pady=2)
+        for val, txt in (("dark", "เข้ม (dark)"), ("light", "สว่าง (light)")):
+            tk.Radiobutton(th_fr, text=txt, value=val, variable=v_theme,
+                           fg=TEXT, bg=PANEL_BG, selectcolor=ROW_BG,
+                           activebackground=PANEL_BG,
+                           activeforeground=TEXT,
+                           font=self.f_note).pack(side="left", padx=(0, 8))
+
         v_ghost = tk.BooleanVar(value=s["ghost_mode"])
+        v_done = tk.BooleanVar(value=s["show_done"])
         v_due = tk.BooleanVar(value=s["show_due"])
         v_note = tk.BooleanVar(value=s["show_note"])
         v_cal = tk.BooleanVar(value=s["show_calendar"])
@@ -1083,12 +1152,13 @@ class TodoOverlay:
                            font=self.f_note).grid(row=r, column=0,
                                                   columnspan=2, sticky="w")
 
-        chk("โหมดล่องหน (ตัวหนังสือลอยบน wallpaper ไม่มีแผง)", v_ghost, 9)
-        chk("แสดงปฏิทิน", v_cal, 10)
-        chk("แสดงหมายเหตุ", v_note, 11)
-        chk("แสดงวันเป้าหมาย", v_due, 12)
-        chk("อยู่บนสุดเสมอ (topmost)", v_top, 13)
-        chk("เปิดพร้อม Windows อัตโนมัติ", v_auto, 14)
+        chk("โหมดล่องหน (ตัวหนังสือลอยบน wallpaper ไม่มีแผง)", v_ghost, 10)
+        chk("แสดงปฏิทิน", v_cal, 11)
+        chk("แสดงงานที่เสร็จแล้ว", v_done, 12)
+        chk("แสดงหมายเหตุ", v_note, 13)
+        chk("แสดงวันเป้าหมาย", v_due, 14)
+        chk("อยู่บนสุดเสมอ (topmost)", v_top, 15)
+        chk("เปิดพร้อม Windows อัตโนมัติ", v_auto, 16)
 
         def ok():
             try:
@@ -1102,10 +1172,11 @@ class TodoOverlay:
                 v_src.get() != s.get("cal_source")
                 or e_url.get().strip() != s.get("ical_url", "")
                 or e_path.get().strip() != s.get("ics_path", ""))
-            s.update(font_family=cb_font.get() or s["font_family"],
+            s.update(theme=v_theme.get(),
+                     font_family=cb_font.get() or s["font_family"],
                      font_size=size, opacity=round(v_op.get(), 2),
-                     ghost_mode=v_ghost.get(), show_due=v_due.get(),
-                     show_note=v_note.get(),
+                     ghost_mode=v_ghost.get(), show_done=v_done.get(),
+                     show_due=v_due.get(), show_note=v_note.get(),
                      show_calendar=v_cal.get(), topmost=v_top.get(),
                      cal_source=v_src.get(),
                      ical_url=e_url.get().strip(),
@@ -1120,7 +1191,7 @@ class TodoOverlay:
                 self.fetch_ical(notify=True)
 
         btns = tk.Frame(dlg, bg=PANEL_BG)
-        btns.grid(row=15, column=0, columnspan=2, pady=(10, 0))
+        btns.grid(row=17, column=0, columnspan=2, pady=(10, 0))
         tk.Button(btns, text="บันทึก", width=10, command=ok).pack(
             side="left", padx=4)
         tk.Button(btns, text="ยกเลิก", width=10,
