@@ -1,0 +1,14 @@
+# --- SECRETS: never commit these ---
+# todo_data.json contains the secret iCal URL and Google client secret
+todo_data.json
+ical_cache.json
+google_token.json
+*.json.bak
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+Thumbs.db
+desktop.ini
