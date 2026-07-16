@@ -47,6 +47,7 @@ DATA_FILE = APP_DIR / "todo_data.json"
 BACKUP_FILE = APP_DIR / "todo_data.backup.json"
 BACKUP_FILE2 = APP_DIR / "todo_data.backup2.json"
 CACHE_FILE = APP_DIR / "ical_cache.json"
+WORKLOG_FILE = APP_DIR / "worklog.json"
 TOKEN_FILE = APP_DIR / "google_token.json"
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -177,6 +178,42 @@ def save_data(data):
             json.dump(data, f, ensure_ascii=False, indent=2)
     except OSError as e:
         messagebox.showerror(APP_NAME, f"บันทึกไฟล์ไม่สำเร็จ:\n{e}")
+
+
+def append_worklog(task):
+    """Append a finished task to worklog.json — a permanent, append-only
+    history used for the yearly performance review. Deleting the task
+    later does not touch this file.
+    Skips when the same task was already logged today, so toggling a
+    task's status back and forth doesn't create duplicates.
+    star/impact are reserved fields (empty for now) to be filled in
+    later when marking notable work — no data migration needed."""
+    today = date.today().isoformat()
+    try:
+        with open(WORKLOG_FILE, "r", encoding="utf-8") as f:
+            log = json.load(f)
+        if not isinstance(log, list):
+            log = []
+    except (json.JSONDecodeError, OSError):
+        log = []
+    for e in log:
+        if e.get("id") == task.get("id") and e.get("done_date") == today:
+            return
+    log.append({
+        "id": task.get("id", ""),
+        "title": task.get("title", ""),
+        "note": task.get("note", ""),
+        "priority": task.get("priority", "medium"),
+        "created": task.get("created", ""),
+        "done_date": today,
+        "star": False,
+        "impact": "",
+    })
+    try:
+        with open(WORKLOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(log, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
 
 
 def load_event_cache():
@@ -490,6 +527,7 @@ class TodoOverlay:
         self.f_note_done = tkfont.Font(family=fam, size=max(size - 2, 7),
                                        overstrike=1)
         self.f_small = tkfont.Font(family=fam, size=max(size - 3, 7))
+        self.f_dialog = tkfont.Font(family=fam, size=size)
         self.f_head = tkfont.Font(family=fam, size=size + 1, weight="bold")
         self.f_icon = tkfont.Font(family=fam, size=size + 2)
         self.f_cal = tkfont.Font(family=fam, size=max(size - 1, 8))
@@ -865,11 +903,16 @@ class TodoOverlay:
     def cycle_status(self, task):
         i = STATUS_ORDER.index(task["status"])
         task["status"] = STATUS_ORDER[(i + 1) % len(STATUS_ORDER)]
+        if task["status"] == "done":
+            append_worklog(task)
         save_data(self.data)
         self.refresh()
 
     def set_status(self, task, status):
+        was_done = task["status"] == "done"
         task["status"] = status
+        if status == "done" and not was_done:
+            append_worklog(task)
         save_data(self.data)
         self.refresh()
 
@@ -917,31 +960,36 @@ class TodoOverlay:
                      f"+{self.root.winfo_y() + 30}")
         dlg.grab_set()
 
+        # dropdown lists of comboboxes follow the configured font too
+        dlg.option_add("*TCombobox*Listbox.font", self.f_dialog)
+
         def lab(text, r):
             tk.Label(dlg, text=text, fg=TEXT, bg=PANEL_BG,
-                     font=self.f_note).grid(row=r, column=0, sticky="w",
-                                            pady=3, padx=(0, 8))
+                     font=self.f_dialog).grid(row=r, column=0, sticky="w",
+                                              pady=3, padx=(0, 8))
 
         lab("หัวข้อ *", 0)
-        e_title = tk.Entry(dlg, width=32, font=self.f_note)
+        e_title = tk.Entry(dlg, width=32, font=self.f_dialog)
         e_title.grid(row=0, column=1, pady=3)
 
         lab("หมายเหตุ", 1)
-        e_note = tk.Entry(dlg, width=32, font=self.f_note)
+        e_note = tk.Entry(dlg, width=32, font=self.f_dialog)
         e_note.grid(row=1, column=1, pady=3)
 
         lab("ความสำคัญ", 2)
         cb_pri = ttk.Combobox(dlg, state="readonly", width=12,
+                              font=self.f_dialog,
                               values=[PRIORITY_LABEL[k] for k in PRIORITY_ORDER])
         cb_pri.grid(row=2, column=1, sticky="w", pady=3)
 
         lab("สถานะ", 3)
         cb_st = ttk.Combobox(dlg, state="readonly", width=12,
+                             font=self.f_dialog,
                              values=[STATUS_LABEL[k] for k in STATUS_ORDER])
         cb_st.grid(row=3, column=1, sticky="w", pady=3)
 
         lab("วันเป้าหมาย", 4)
-        e_due = tk.Entry(dlg, width=16, font=self.f_note)
+        e_due = tk.Entry(dlg, width=16, font=self.f_dialog)
         e_due.grid(row=4, column=1, sticky="w", pady=3)
         tk.Label(dlg, text="รูปแบบ YYYY-MM-DD (เว้นว่างได้)", fg=DIM,
                  bg=PANEL_BG, font=self.f_small).grid(row=5, column=1,
@@ -975,15 +1023,21 @@ class TodoOverlay:
             stt = STATUS_ORDER[
                 [STATUS_LABEL[k] for k in STATUS_ORDER].index(cb_st.get())]
             if task is None:
-                self.data["tasks"].append({
+                new_task = {
                     "id": uuid.uuid4().hex[:8],
                     "title": title, "note": e_note.get().strip(),
                     "priority": pri, "status": stt,
                     "created": date.today().isoformat(), "due": due,
-                })
+                }
+                self.data["tasks"].append(new_task)
+                if stt == "done":
+                    append_worklog(new_task)
             else:
+                was_done = task["status"] == "done"
                 task.update(title=title, note=e_note.get().strip(),
                             priority=pri, status=stt, due=due)
+                if stt == "done" and not was_done:
+                    append_worklog(task)
             save_data(self.data)
             dlg.destroy()
             self.refresh()
@@ -1010,15 +1064,18 @@ class TodoOverlay:
                      f"+{self.root.winfo_y() + 30}")
         dlg.grab_set()
 
+        # dropdown lists of comboboxes follow the configured font too
+        dlg.option_add("*TCombobox*Listbox.font", self.f_dialog)
+
         def lab(text, r):
             tk.Label(dlg, text=text, fg=TEXT, bg=PANEL_BG,
-                     font=self.f_note).grid(row=r, column=0, sticky="nw",
-                                            pady=4, padx=(0, 8))
+                     font=self.f_dialog).grid(row=r, column=0, sticky="nw",
+                                              pady=4, padx=(0, 8))
 
         def masked_entry(parent, value, width):
             """Entry that hides its content like a password, with 👁 toggle."""
             fr = tk.Frame(parent, bg=PANEL_BG)
-            ent = tk.Entry(fr, width=width, font=self.f_small, show="•")
+            ent = tk.Entry(fr, width=width, font=self.f_dialog, show="•")
             ent.insert(0, value)
             ent.pack(side="left")
             eye = tk.Label(fr, text="👁", bg=PANEL_BG, fg=DIM,
@@ -1030,12 +1087,14 @@ class TodoOverlay:
 
         lab("ฟอนต์", 0)
         fams = sorted(set(tkfont.families()))
-        cb_font = ttk.Combobox(dlg, values=fams, width=26)
+        cb_font = ttk.Combobox(dlg, values=fams, width=26,
+                               font=self.f_dialog)
         cb_font.set(s["font_family"])
         cb_font.grid(row=0, column=1, sticky="w", pady=4)
 
         lab("ขนาดตัวอักษร", 1)
-        sp_size = tk.Spinbox(dlg, from_=8, to=28, width=6)
+        sp_size = tk.Spinbox(dlg, from_=8, to=28, width=6,
+                             font=self.f_dialog)
         sp_size.delete(0, "end")
         sp_size.insert(0, s["font_size"])
         sp_size.grid(row=1, column=1, sticky="w", pady=4)
@@ -1058,7 +1117,7 @@ class TodoOverlay:
                            fg=TEXT, bg=PANEL_BG, selectcolor=ROW_BG,
                            activebackground=PANEL_BG,
                            activeforeground=TEXT,
-                           font=self.f_note).pack(side="left", padx=(0, 8))
+                           font=self.f_dialog).pack(side="left", padx=(0, 8))
 
         lab("ลิงก์ Secret iCal", 4)
         url_fr, e_url = masked_entry(dlg, s.get("ical_url", ""), 38)
@@ -1067,7 +1126,7 @@ class TodoOverlay:
         lab("ไฟล์ .ics", 5)
         file_fr = tk.Frame(dlg, bg=PANEL_BG)
         file_fr.grid(row=5, column=1, sticky="w", pady=2)
-        e_path = tk.Entry(file_fr, width=32, font=self.f_small)
+        e_path = tk.Entry(file_fr, width=32, font=self.f_dialog)
         e_path.insert(0, s.get("ics_path", ""))
         e_path.pack(side="left")
 
@@ -1083,7 +1142,7 @@ class TodoOverlay:
             side="left", padx=4)
 
         lab("Client ID", 6)
-        e_cid = tk.Entry(dlg, width=40, font=self.f_small)
+        e_cid = tk.Entry(dlg, width=40, font=self.f_dialog)
         e_cid.insert(0, s.get("g_client_id", ""))
         e_cid.grid(row=6, column=1, sticky="w", pady=2)
 
@@ -1135,7 +1194,7 @@ class TodoOverlay:
                            fg=TEXT, bg=PANEL_BG, selectcolor=ROW_BG,
                            activebackground=PANEL_BG,
                            activeforeground=TEXT,
-                           font=self.f_note).pack(side="left", padx=(0, 8))
+                           font=self.f_dialog).pack(side="left", padx=(0, 8))
 
         v_ghost = tk.BooleanVar(value=s["ghost_mode"])
         v_done = tk.BooleanVar(value=s["show_done"])
@@ -1149,8 +1208,8 @@ class TodoOverlay:
             tk.Checkbutton(dlg, text=text, variable=var, fg=TEXT,
                            bg=PANEL_BG, selectcolor=ROW_BG,
                            activebackground=PANEL_BG, activeforeground=TEXT,
-                           font=self.f_note).grid(row=r, column=0,
-                                                  columnspan=2, sticky="w")
+                           font=self.f_dialog).grid(row=r, column=0,
+                                                    columnspan=2, sticky="w")
 
         chk("โหมดล่องหน (ตัวหนังสือลอยบน wallpaper ไม่มีแผง)", v_ghost, 10)
         chk("แสดงปฏิทิน", v_cal, 11)

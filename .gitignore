@@ -6,6 +6,8 @@ google_token.json
 *.json.bak
 PROJECT_BRIEF.md
 todo_data.backup*.json
+# worklog.json contains work history (internal company info)
+worklog.json
 
 # Python
 __pycache__/
