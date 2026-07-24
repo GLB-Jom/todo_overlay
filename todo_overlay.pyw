@@ -42,7 +42,7 @@ import tkinter as tk
 from tkinter import ttk, font as tkfont, messagebox, filedialog
 
 APP_NAME = "TodoOverlay"
-APP_VERSION = "1.8"
+APP_VERSION = "1.9"
 APP_DIR = Path(__file__).resolve().parent
 DATA_FILE = APP_DIR / "todo_data.json"
 BACKUP_FILE = APP_DIR / "todo_data.backup.json"
@@ -106,6 +106,30 @@ STATUS_ICON = {"wait": "○", "doing": "◐", "done": "✔"}
 PRIORITY_ORDER = ["high", "medium", "low"]
 PRIORITY_LABEL = {"high": "สูง", "medium": "กลาง", "low": "ต่ำ"}
 PRIORITY_COLOR = {"high": "#e74c3c", "medium": "#f1c40f", "low": "#95a5a6"}
+
+# Worklog: impact = ขอบเขตผลกระทบ (0 = ยังไม่ระบุ) ; role = บทบาท
+IMPACT_ORDER = [0, 1, 2, 3, 4, 5]
+IMPACT_LABEL = {
+    0: "—",
+    1: "1 ส่วนตัว",
+    2: "2 ช่วยทีม",
+    3: "3 ระดับทีม",
+    4: "4 ระดับฝ่าย/ข้ามทีม",
+    5: "5 ระดับ บ./ภายนอก",
+}
+ROLE_ORDER = ["", "owner", "contributor", "support"]
+ROLE_LABEL = {"": "—", "owner": "เจ้าของงาน",
+              "contributor": "ร่วมทำ", "support": "สนับสนุน"}
+
+
+def coerce_impact(v):
+    """Old worklog entries stored impact as a string; new ones use 0-5.
+    Return a valid int level, defaulting to 0."""
+    try:
+        iv = int(v)
+    except (ValueError, TypeError):
+        return 0
+    return iv if 0 <= iv <= 5 else 0
 
 TH_MONTHS = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม",
              "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม",
@@ -220,7 +244,8 @@ def append_worklog(task):
         "created": task.get("created", ""),
         "done_date": today,
         "star": False,
-        "impact": "",
+        "impact": 0,        # 0-5, ขอบเขตผลกระทบ (เติมทีหลังในหน้าผลงาน)
+        "role": "",         # owner | contributor | support
     })
     save_worklog(log)
 
@@ -1285,9 +1310,10 @@ class TodoOverlay:
         dlg.title("ผลงานที่บันทึก")
         dlg.configure(bg=PANEL_BG)
         dlg.attributes("-topmost", True)
-        dlg.geometry(f"520x560+{self.root.winfo_x() + 30}"
+        dlg.geometry(f"560x580+{self.root.winfo_x() + 30}"
                      f"+{self.root.winfo_y() + 30}")
         dlg.grab_set()
+        dlg.option_add("*TCombobox*Listbox.font", self.f_dialog)
 
         header = tk.Frame(dlg, bg=PANEL_BG, padx=12, pady=8)
         header.pack(fill="x")
@@ -1380,13 +1406,25 @@ class TodoOverlay:
             tk.Label(top, text=dd, font=self.f_small, fg=DIM,
                      bg=ROW_BG).pack(side="right")
 
-            impact_fr = tk.Frame(card, bg=ROW_BG)
-            impact_fr.pack(fill="x", pady=(4, 0))
-            tk.Label(impact_fr, text="impact", font=self.f_small, fg=DIM,
+            sel_fr = tk.Frame(card, bg=ROW_BG)
+            sel_fr.pack(fill="x", pady=(4, 0))
+            tk.Label(sel_fr, text="impact", font=self.f_small, fg=DIM,
                      bg=ROW_BG, width=6, anchor="w").pack(side="left")
-            e_impact = tk.Entry(impact_fr, font=self.f_dialog)
-            e_impact.insert(0, e.get("impact", ""))
-            e_impact.pack(side="left", fill="x", expand=True)
+            cb_impact = ttk.Combobox(
+                sel_fr, state="readonly", width=18, font=self.f_dialog,
+                values=[IMPACT_LABEL[k] for k in IMPACT_ORDER])
+            cb_impact.set(IMPACT_LABEL[coerce_impact(e.get("impact"))])
+            cb_impact.pack(side="left")
+            tk.Label(sel_fr, text="บทบาท", font=self.f_small, fg=DIM,
+                     bg=ROW_BG, anchor="w").pack(side="left", padx=(10, 4))
+            cb_role = ttk.Combobox(
+                sel_fr, state="readonly", width=10, font=self.f_dialog,
+                values=[ROLE_LABEL[k] for k in ROLE_ORDER])
+            role_key = e.get("role", "")
+            if role_key not in ROLE_LABEL:
+                role_key = ""
+            cb_role.set(ROLE_LABEL[role_key])
+            cb_role.pack(side="left")
 
             note_fr = tk.Frame(card, bg=ROW_BG)
             note_fr.pack(fill="x", pady=(3, 0))
@@ -1396,12 +1434,16 @@ class TodoOverlay:
             e_note.insert(0, e.get("note", ""))
             e_note.pack(side="left", fill="x", expand=True)
 
-            editors.append((e, star_var, e_impact, e_note))
+            editors.append((e, star_var, cb_impact, cb_role, e_note))
+
+        impact_by_label = {IMPACT_LABEL[k]: k for k in IMPACT_ORDER}
+        role_by_label = {ROLE_LABEL[k]: k for k in ROLE_ORDER}
 
         def commit():
-            for entry, sv, imp, nt in editors:
+            for entry, sv, imp, role, nt in editors:
                 entry["star"] = sv.get()
-                entry["impact"] = imp.get().strip()
+                entry["impact"] = impact_by_label.get(imp.get(), 0)
+                entry["role"] = role_by_label.get(role.get(), "")
                 entry["note"] = nt.get().strip()
             save_worklog(log)
 
