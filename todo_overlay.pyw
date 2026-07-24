@@ -42,6 +42,7 @@ import tkinter as tk
 from tkinter import ttk, font as tkfont, messagebox, filedialog
 
 APP_NAME = "TodoOverlay"
+APP_VERSION = "1.8"
 APP_DIR = Path(__file__).resolve().parent
 DATA_FILE = APP_DIR / "todo_data.json"
 BACKUP_FILE = APP_DIR / "todo_data.backup.json"
@@ -180,22 +181,34 @@ def save_data(data):
         messagebox.showerror(APP_NAME, f"บันทึกไฟล์ไม่สำเร็จ:\n{e}")
 
 
+def load_worklog():
+    """Return the worklog as a list (empty list on missing/broken file)."""
+    try:
+        with open(WORKLOG_FILE, "r", encoding="utf-8") as f:
+            log = json.load(f)
+        return log if isinstance(log, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_worklog(log):
+    try:
+        with open(WORKLOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(log, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
 def append_worklog(task):
     """Append a finished task to worklog.json — a permanent, append-only
     history used for the yearly performance review. Deleting the task
     later does not touch this file.
     Skips when the same task was already logged today, so toggling a
     task's status back and forth doesn't create duplicates.
-    star/impact are reserved fields (empty for now) to be filled in
-    later when marking notable work — no data migration needed."""
+    star/impact are filled in later via the worklog editor — no data
+    migration needed."""
     today = date.today().isoformat()
-    try:
-        with open(WORKLOG_FILE, "r", encoding="utf-8") as f:
-            log = json.load(f)
-        if not isinstance(log, list):
-            log = []
-    except (json.JSONDecodeError, OSError):
-        log = []
+    log = load_worklog()
     for e in log:
         if e.get("id") == task.get("id") and e.get("done_date") == today:
             return
@@ -209,11 +222,7 @@ def append_worklog(task):
         "star": False,
         "impact": "",
     })
-    try:
-        with open(WORKLOG_FILE, "w", encoding="utf-8") as f:
-            json.dump(log, f, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
+    save_worklog(log)
 
 
 def load_event_cache():
@@ -547,7 +556,10 @@ class TodoOverlay:
         title = tk.Label(head, text="📝 To-Do", font=self.f_head,
                          fg=TEXT, bg=self.bg)
         title.pack(side="left")
-        for w in (head, title):
+        ver = tk.Label(head, text=f"v{APP_VERSION}", font=self.f_small,
+                       fg=DIM, bg=self.bg)
+        ver.pack(side="left", padx=(4, 0), pady=(3, 0))
+        for w in (head, title, ver):
             w.bind("<ButtonPress-1>", self.drag_start)
             w.bind("<B1-Motion>", self.drag_move)
             w.bind("<ButtonRelease-1>", self.drag_end)
@@ -1249,13 +1261,167 @@ class TodoOverlay:
             if src_changed:
                 self.fetch_ical(notify=True)
 
+        wl_fr = tk.Frame(dlg, bg=PANEL_BG)
+        wl_fr.grid(row=17, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        tk.Button(wl_fr, text="🏆 ผลงานที่บันทึก…",
+                  command=self.open_worklog).pack(side="left")
+        tk.Label(wl_fr, text="(ประวัติงานที่ทำเสร็จ ใส่ดาว/impact ได้)",
+                 fg=DIM, bg=PANEL_BG, font=self.f_small).pack(
+                     side="left", padx=6)
+
         btns = tk.Frame(dlg, bg=PANEL_BG)
-        btns.grid(row=17, column=0, columnspan=2, pady=(10, 0))
+        btns.grid(row=18, column=0, columnspan=2, pady=(10, 0))
         tk.Button(btns, text="บันทึก", width=10, command=ok).pack(
             side="left", padx=4)
         tk.Button(btns, text="ยกเลิก", width=10,
                   command=dlg.destroy).pack(side="left", padx=4)
         dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+    # ---------------- worklog viewer / editor ----------------
+    def open_worklog(self):
+        log = load_worklog()
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("ผลงานที่บันทึก")
+        dlg.configure(bg=PANEL_BG)
+        dlg.attributes("-topmost", True)
+        dlg.geometry(f"520x560+{self.root.winfo_x() + 30}"
+                     f"+{self.root.winfo_y() + 30}")
+        dlg.grab_set()
+
+        header = tk.Frame(dlg, bg=PANEL_BG, padx=12, pady=8)
+        header.pack(fill="x")
+        tk.Label(header, text="🏆 ผลงานที่บันทึก", font=self.f_head,
+                 fg=TEXT, bg=PANEL_BG).pack(side="left")
+        tk.Label(header, text=f"{len(log)} รายการ", font=self.f_small,
+                 fg=DIM, bg=PANEL_BG).pack(side="left", padx=8)
+
+        # scrollable body (Canvas + inner frame + scrollbar + mousewheel)
+        body = tk.Frame(dlg, bg=PANEL_BG)
+        body.pack(fill="both", expand=True, padx=(12, 0))
+        canvas = tk.Canvas(body, bg=PANEL_BG, highlightthickness=0)
+        vsb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=PANEL_BG)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(win, width=e.width))
+
+        def on_wheel(e):
+            canvas.yview_scroll(int(-e.delta / 120), "units")
+        canvas.bind_all("<MouseWheel>", on_wheel)
+
+        def unbind_wheel():
+            try:
+                canvas.unbind_all("<MouseWheel>")
+            except tk.TclError:
+                pass
+
+        # newest first; group with a month header
+        entries = sorted(
+            log, key=lambda e: e.get("done_date", ""), reverse=True)
+        editors = []           # [(entry, star_var, impact_entry, note_entry)]
+
+        if not entries:
+            tk.Label(inner, text="ยังไม่มีผลงานที่บันทึก\n"
+                                  "งานจะถูกบันทึกอัตโนมัติเมื่อติ๊กเป็น "
+                                  "\"ทำแล้ว\"",
+                     font=self.f_dialog, fg=DIM, bg=PANEL_BG,
+                     justify="left", pady=20).pack(anchor="w", padx=4)
+
+        cur_month = None
+        for e in entries:
+            dd = e.get("done_date", "")
+            month_key = dd[:7]
+            if month_key != cur_month:
+                cur_month = month_key
+                label = month_key
+                try:
+                    y, mo = month_key.split("-")
+                    label = f"{TH_MONTHS[int(mo) - 1]} {y}"
+                except (ValueError, IndexError):
+                    pass
+                tk.Label(inner, text=label, font=self.f_cal_b, fg=ACCENT,
+                         bg=PANEL_BG, anchor="w").pack(
+                             fill="x", pady=(10, 2), padx=4)
+                tk.Frame(inner, bg=DIVIDER, height=1).pack(
+                    fill="x", padx=4)
+
+            card = tk.Frame(inner, bg=ROW_BG, padx=8, pady=6)
+            card.pack(fill="x", pady=3, padx=4)
+
+            top = tk.Frame(card, bg=ROW_BG)
+            top.pack(fill="x")
+            star_var = tk.BooleanVar(value=bool(e.get("star")))
+            star = tk.Label(top, font=self.f_icon, bg=ROW_BG,
+                            cursor="hand2", width=2)
+
+            def render_star(lbl=star, var=star_var):
+                lbl.config(text="⭐" if var.get() else "☆",
+                           fg="#f1c40f" if var.get() else DIM)
+            render_star()
+            star.pack(side="left")
+
+            def toggle(ev, lbl=star, var=star_var):
+                var.set(not var.get())
+                render_star(lbl, var)
+            star.bind("<Button-1>", toggle)
+
+            pri = e.get("priority", "medium")
+            tk.Frame(top, bg=PRIORITY_COLOR.get(pri, DIM),
+                     width=4, height=18).pack(side="left", padx=(2, 6))
+            tk.Label(top, text=e.get("title", "(ไม่มีชื่อ)"),
+                     font=self.f_dialog, fg=TEXT, bg=ROW_BG, anchor="w",
+                     justify="left", wraplength=360).pack(side="left")
+            tk.Label(top, text=dd, font=self.f_small, fg=DIM,
+                     bg=ROW_BG).pack(side="right")
+
+            impact_fr = tk.Frame(card, bg=ROW_BG)
+            impact_fr.pack(fill="x", pady=(4, 0))
+            tk.Label(impact_fr, text="impact", font=self.f_small, fg=DIM,
+                     bg=ROW_BG, width=6, anchor="w").pack(side="left")
+            e_impact = tk.Entry(impact_fr, font=self.f_dialog)
+            e_impact.insert(0, e.get("impact", ""))
+            e_impact.pack(side="left", fill="x", expand=True)
+
+            note_fr = tk.Frame(card, bg=ROW_BG)
+            note_fr.pack(fill="x", pady=(3, 0))
+            tk.Label(note_fr, text="note", font=self.f_small, fg=DIM,
+                     bg=ROW_BG, width=6, anchor="w").pack(side="left")
+            e_note = tk.Entry(note_fr, font=self.f_dialog)
+            e_note.insert(0, e.get("note", ""))
+            e_note.pack(side="left", fill="x", expand=True)
+
+            editors.append((e, star_var, e_impact, e_note))
+
+        def commit():
+            for entry, sv, imp, nt in editors:
+                entry["star"] = sv.get()
+                entry["impact"] = imp.get().strip()
+                entry["note"] = nt.get().strip()
+            save_worklog(log)
+
+        def save_close():
+            commit()
+            unbind_wheel()
+            dlg.destroy()
+
+        def cancel():
+            unbind_wheel()
+            dlg.destroy()
+
+        btns = tk.Frame(dlg, bg=PANEL_BG, padx=12, pady=10)
+        btns.pack(fill="x")
+        tk.Button(btns, text="บันทึก", width=10, command=save_close).pack(
+            side="left", padx=4)
+        tk.Button(btns, text="ปิด", width=10, command=cancel).pack(
+            side="left", padx=4)
+        dlg.protocol("WM_DELETE_WINDOW", save_close)
+        dlg.bind("<Escape>", lambda ev: cancel())
 
     def run(self):
         self.root.mainloop()
